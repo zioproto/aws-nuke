@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -8,7 +9,10 @@ import (
 	"github.com/rebuy-de/aws-nuke/pkg/config"
 	"github.com/rebuy-de/aws-nuke/pkg/types"
 	"github.com/rebuy-de/aws-nuke/resources"
+	"golang.org/x/sync/semaphore"
 )
+
+const RemoveParallelQueries = 16
 
 type Nuke struct {
 	Parameters NukeParameters
@@ -86,7 +90,10 @@ func (n *Nuke) Run() error {
 	failCount := 0
 
 	for {
-		n.HandleQueue()
+		err := n.HandleQueue()
+		if err != nil {
+			return err
+		}
 
 		if n.items.Count(ItemStatePending, ItemStateWaiting, ItemStateNew) == 0 && n.items.Count(ItemStateFailed) > 0 {
 			if failCount >= 2 {
@@ -203,33 +210,53 @@ func (n *Nuke) Filter(item *Item) error {
 	return nil
 }
 
-func (n *Nuke) HandleQueue() {
+func (n *Nuke) HandleQueue() error {
 	listCache := make(map[string][]resources.Resource)
+	sem := semaphore.NewWeighted(RemoveParallelQueries)
+	ctx := context.Background()
 
 	for _, item := range n.items {
-		switch item.State {
-		case ItemStateNew:
-			n.HandleRemove(item)
-			item.Print()
-		case ItemStateFailed:
-			n.HandleRemove(item)
-			n.HandleWait(item, listCache)
-			item.Print()
-		case ItemStatePending:
-			n.HandleWait(item, listCache)
-			item.State = ItemStateWaiting
-			item.Print()
-		case ItemStateWaiting:
-			n.HandleWait(item, listCache)
-			item.Print()
+		err := sem.Acquire(ctx, 1)
+		if err != nil {
+			return err
 		}
 
+		go n.handleQueueItem(listCache, sem, item)
+	}
+
+	err := sem.Acquire(ctx, RemoveParallelQueries)
+	if err != nil {
+		return err
 	}
 
 	fmt.Println()
 	fmt.Printf("Removal requested: %d waiting, %d failed, %d skipped, %d finished\n\n",
 		n.items.Count(ItemStateWaiting, ItemStatePending), n.items.Count(ItemStateFailed),
 		n.items.Count(ItemStateFiltered), n.items.Count(ItemStateFinished))
+
+	return nil
+}
+
+func (n *Nuke) handleQueueItem(listCache map[string][]resources.Resource, sem *semaphore.Weighted, item *Item) {
+	defer sem.Release(1)
+
+	switch item.State {
+	case ItemStateNew:
+		n.HandleRemove(item)
+		item.Print()
+	case ItemStateFailed:
+		n.HandleRemove(item)
+		n.HandleWait(item, listCache)
+		item.Print()
+	case ItemStatePending:
+		n.HandleWait(item, listCache)
+		item.State = ItemStateWaiting
+		item.Print()
+	case ItemStateWaiting:
+		n.HandleWait(item, listCache)
+		item.Print()
+	}
+
 }
 
 func (n *Nuke) HandleRemove(item *Item) {
