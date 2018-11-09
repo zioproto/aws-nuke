@@ -122,9 +122,11 @@ accounts:
       IAMUser:
       - "my-user"
       IAMUserPolicyAttachment:
-      - "my-user -> AdministratorAccess"
+      - property: RoleName
+        value: AdministratorAccess
       IAMUserAccessKey:
-      - "my-user -> ABCDEFGHIJKLMNOPQRST"
+      - property: UserName
+        value: my-user
 ```
 
 ```
